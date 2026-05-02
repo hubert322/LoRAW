@@ -4,12 +4,19 @@ import os
 import torch
 import pytorch_lightning as pl
 import random
+import multiprocessing
+
+# Set multiprocessing start method to 'fork' for macOS compatibility with custom metadata functions
+if __name__ == '__main__':
+    try:
+        multiprocessing.set_start_method('fork', force=True)
+    except RuntimeError:
+        pass
 
 from stable_audio_tools.data.dataset import create_dataloader_from_config
 from stable_audio_tools.models import create_model_from_config
-from stable_audio_tools.models.utils import load_ckpt_state_dict, remove_weight_norm_from_model
+from stable_audio_tools.models.utils import load_ckpt_state_dict, remove_weight_norm_from_model, copy_state_dict
 from stable_audio_tools.training import create_training_wrapper_from_config, create_demo_callback_from_config
-from stable_audio_tools.training.utils import copy_state_dict
 
 from loraw.network import create_lora_from_config
 from loraw.callbacks import LoRAModelCheckpoint, ReLoRAModelCheckpoint
@@ -81,6 +88,23 @@ def main():
 
     training_wrapper = create_training_wrapper_from_config(model_config, model)
 
+    # Patch for padding_mask shape issue in stable-audio-tools
+    from types import MethodType
+    def patch_step(original_step):
+        def fixed_step(self, batch, *args, **kwargs):
+            _, metadata = batch
+            if isinstance(metadata, (list, tuple)):
+                for md in metadata:
+                    if "padding_mask" in md and isinstance(md["padding_mask"], torch.Tensor) and md["padding_mask"].ndim == 1:
+                        md["padding_mask"] = md["padding_mask"].unsqueeze(0)
+            return original_step(batch, *args, **kwargs)
+        return fixed_step
+
+    training_wrapper.training_step = MethodType(patch_step(training_wrapper.training_step), training_wrapper)
+
+    if hasattr(training_wrapper, "validation_step"):
+        training_wrapper.validation_step = MethodType(patch_step(training_wrapper.validation_step), training_wrapper)
+
     # LORA: Prepare training
     if args.use_lora == 'true':
         lora.prepare_for_training(training_wrapper)
@@ -138,7 +162,7 @@ def main():
         plugins = BitsandbytesPrecisionPlugin(mode="nf4", dtype=torch.float16, ignore_modules={*lora.residual_modules})
         trainer = pl.Trainer(
             devices=args.num_gpus,
-            accelerator="gpu",
+            accelerator="auto",
             num_nodes = args.num_nodes,
             strategy=strategy,
             plugins=plugins,
@@ -154,7 +178,7 @@ def main():
     else:
         trainer = pl.Trainer(
             devices=args.num_gpus,
-            accelerator="gpu",
+            accelerator="auto",
             num_nodes = args.num_nodes,
             strategy=strategy,
             precision=args.precision,
