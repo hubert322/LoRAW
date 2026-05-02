@@ -61,6 +61,9 @@ def load_model(model_config=None, model_ckpt_path=None, pretrained_name=None, pr
     lora_merger = LoRAMerger(model, component_whitelist=['transformer'])
     lora_merger.net.to(device).eval().requires_grad_(False)
 
+    if model_half:
+        lora_merger.net.to(torch.float16)
+
     return model, model_config
 
 def generate_cond(

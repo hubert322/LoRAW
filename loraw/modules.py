@@ -83,8 +83,9 @@ class LoRAModule(nn.Module):
 
     def dump_weights(self):
         # Update original module weights
+        dtype = self.original_module.weight.dtype
         updated = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
-        self.original_module.weight.data = updated.clone().detach()
+        self.original_module.weight.data = updated.to(dtype).clone().detach()
 
         # Reinit lora weights
         self.init_weights()

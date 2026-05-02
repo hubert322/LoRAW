@@ -250,8 +250,8 @@ class LoRAWrapper:
 
             # Update up and down
             lora_multiplier = 1.0 if is_dora else multiplier
-            module.lora_down.weight.data = (weights['lora_down'] * lora_multiplier).detach()
-            module.lora_up.weight.data = (weights['lora_up'] * lora_multiplier).detach()
+            module.lora_down.weight.data = (weights['lora_down'] * lora_multiplier).to(module.lora_down.weight.dtype).detach()
+            module.lora_up.weight.data = (weights['lora_up'] * lora_multiplier).to(module.lora_up.weight.dtype).detach()
 
             # Handle DoRA magnitude
             if is_dora:
