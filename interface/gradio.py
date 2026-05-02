@@ -222,7 +222,17 @@ def generate_cond(
 
     # Convert to WAV file
     audio = rearrange(audio, "b d n -> d (b n)")
-    audio = audio.to(torch.float32).div(torch.max(torch.abs(audio))).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+    audio = audio.to(torch.float32)
+
+    # Safety check for NaNs or silence
+    max_val = torch.max(torch.abs(audio))
+    if torch.isnan(max_val) or max_val < 1e-8:
+        print(f"Warning: Model produced invalid audio (max_val={max_val}). Returning silence.")
+        audio = torch.zeros_like(audio)
+    else:
+        audio = audio.div(max_val).clamp(-1, 1)
+
+    audio = audio.mul(32767).to(torch.int16).cpu()
     torchaudio.save("output.wav", audio, sample_rate)
 
     # Let's look at a nice spectrogram too

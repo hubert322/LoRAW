@@ -65,11 +65,14 @@ class LoRAModule(nn.Module):
         if self.dora_mag is None:
             return lx
         
-        # Calculate V + dV for dora scaling
-        new_weight_v = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
-        # m / ||V + dV||, Note: ||V + dV|| is detached to prevent gradent calculation
-        norm_scale = self.dora_mag.weight.view(-1) / (torch.linalg.norm(new_weight_v, dim=1)).detach()
-        # m / ||V + dV|| * (xV + xdV)
+        # Calculate V + dV for dora scaling in f32 to prevent overflow
+        v_plus_dv = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        v_plus_dv_f32 = v_plus_dv.float()
+        norm = torch.linalg.norm(v_plus_dv_f32, dim=1).detach()
+        mag = self.dora_mag.weight.view(-1)
+        norm_scale = (mag / (norm + 1e-6)).to(x.dtype)
+        
+        # Apply scaling to the already computed lx = x(V + dV)
         return norm_scale * lx
 
     def inject(self, parent_module):
@@ -89,9 +92,13 @@ class LoRAModule(nn.Module):
             updated = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
         else:
             # Apply DoRA weight update formula: W_new = m * (V + dV) / ||V + dV||
+            # We perform the norm in float32 to prevent overflow in FP16
             v_plus_dv = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
             mag = self.dora_mag.weight.view(-1, 1)
-            updated = mag * v_plus_dv / (torch.linalg.norm(v_plus_dv, dim=1, keepdim=True)).detach()
+            v_plus_dv_f32 = v_plus_dv.float()
+            norm = torch.linalg.norm(v_plus_dv_f32, dim=1, keepdim=True)
+            updated = mag * (v_plus_dv_f32 / (norm + 1e-6))
+            updated = updated.to(dtype)
 
         self.original_module.weight.data = updated.to(dtype).clone().detach()
 

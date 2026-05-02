@@ -306,11 +306,13 @@ class LoRAMerger(LoRAWrapper):
                 print(f'{lora_name} merged with strength {mul}')
 
     def restore(self):
+        device = next(self.net.parameters()).device
         for name, module in self.net.lora_modules.items():
-            module.original_module.weight.data = self.backup[name].clone().detach().to('cuda')
+            module.original_module.weight.data = self.backup[name].clone().detach().to(device)
             module.init_weights()
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print('Base model weights restored from backup')
     
 
