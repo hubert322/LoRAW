@@ -84,7 +84,15 @@ class LoRAModule(nn.Module):
     def dump_weights(self):
         # Update original module weights
         dtype = self.original_module.weight.dtype
-        updated = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        
+        if self.dora_mag is None:
+            updated = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        else:
+            # Apply DoRA weight update formula: W_new = m * (V + dV) / ||V + dV||
+            v_plus_dv = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+            mag = self.dora_mag.weight.view(-1, 1)
+            updated = mag * v_plus_dv / (torch.linalg.norm(v_plus_dv, dim=1, keepdim=True)).detach()
+
         self.original_module.weight.data = updated.to(dtype).clone().detach()
 
         # Reinit lora weights

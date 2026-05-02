@@ -257,7 +257,9 @@ class LoRAWrapper:
             if is_dora:
                 if module.dora_mag is None:
                     module.dora_mag = torch.nn.Linear(1, module.out_dim)
-                module.dora_mag.weight.data = (weights['dora_mag'] * multiplier).detach()
+                # Correctly interpolate magnitude: m_eff = m_orig + (m_tuned - m_orig) * multiplier
+                orig_mag = torch.linalg.norm(module.original_module.weight.detach(), dim=1).unsqueeze(1)
+                module.dora_mag.weight.data = (orig_mag + (weights['dora_mag'] - orig_mag) * multiplier).to(module.dora_mag.weight.dtype).detach()
             else:
                 module.dora_mag = None
 
