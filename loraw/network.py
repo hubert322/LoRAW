@@ -257,7 +257,7 @@ class LoRAWrapper:
             if is_dora:
                 if module.dora_mag is None:
                     module.dora_mag = torch.nn.Linear(1, module.out_dim)
-                module.dora_mag.weight.data = (weights['lora_down'] * multiplier).detach()
+                module.dora_mag.weight.data = (weights['dora_mag'] * multiplier).detach()
             else:
                 module.dora_mag = None
 
@@ -306,6 +306,7 @@ class LoRAMerger(LoRAWrapper):
     def restore(self):
         for name, module in self.net.lora_modules.items():
             module.original_module.weight.data = self.backup[name].clone().detach().to('cuda')
+            module.init_weights()
         gc.collect()
         torch.cuda.empty_cache()
         print('Base model weights restored from backup')
