@@ -20,6 +20,14 @@ from stable_audio_tools.inference.utils import prepare_audio
 
 from loraw.network import LoRAMerger
 
+# Patch TransformerBlock to ignore mask_args if it's not accepted
+from stable_audio_tools.models import transformer
+old_transformer_block_forward = transformer.TransformerBlock.forward
+def new_transformer_block_forward(self, *args, **kwargs):
+    kwargs.pop("mask_args", None)
+    return old_transformer_block_forward(self, *args, **kwargs)
+transformer.TransformerBlock.forward = new_transformer_block_forward
+
 model = None
 sample_rate = 32000
 sample_size = 1920000
@@ -206,7 +214,6 @@ def generate_cond(
         sigma_max=sigma_max,
         init_audio=init_audio,
         init_noise_level=init_noise_level,
-        mask_args = mask_args,
         callback = progress_callback if preview_every is not None else None,
         scale_phi = cfg_rescale
     )
