@@ -250,16 +250,40 @@ class LoRAWrapper:
 
             # Update up and down
             lora_multiplier = 1.0 if is_dora else multiplier
-            module.lora_down.weight.data = (weights['lora_down'] * lora_multiplier).to(module.lora_down.weight.dtype).detach()
-            module.lora_up.weight.data = (weights['lora_up'] * lora_multiplier).to(module.lora_up.weight.dtype).detach()
+            module.lora_down.weight.data = (weights['lora_down'].to(module.lora_down.weight.device) * lora_multiplier).to(module.lora_down.weight.dtype).detach()
+            module.lora_up.weight.data = (weights['lora_up'].to(module.lora_up.weight.device) * lora_multiplier).to(module.lora_up.weight.dtype).detach()
 
             # Handle DoRA magnitude
             if is_dora:
                 if module.dora_mag is None:
-                    module.dora_mag = torch.nn.Linear(1, module.out_dim)
+                    module.dora_mag = torch.nn.Linear(1, module.out_dim, bias=False).to(module.original_module.weight.device).to(module.original_module.weight.dtype)
+                
                 # Correctly interpolate magnitude: m_eff = m_orig + (m_tuned - m_orig) * multiplier
-                orig_mag = torch.linalg.norm(module.original_module.weight.detach(), dim=1).unsqueeze(1)
-                module.dora_mag.weight.data = (orig_mag + (weights['dora_mag'] - orig_mag) * multiplier).to(module.dora_mag.weight.dtype).detach()
+                # Use robust norm calculation matching modules.py
+                weight = module.original_module.weight.detach()
+                if weight.ndim == 1 and hasattr(module, 'out_dim') and weight.numel() % module.out_dim == 0:
+                    weight = weight.view(module.out_dim, -1)
+                
+                if weight.ndim > 1:
+                    orig_mag = torch.linalg.norm(weight.view(module.out_dim, -1), dim=1).unsqueeze(1)
+                else:
+                    orig_mag = weight.view(-1, 1)
+
+                # Ensure checkpoint mag matches expected out_dim and is a vector
+                checkpoint_mag = weights['dora_mag'].to(orig_mag.device)
+                if checkpoint_mag.numel() != module.out_dim:
+                    if checkpoint_mag.numel() % module.out_dim == 0:
+                        # Broken checkpoint: magnitude was saved as a matrix or flattened matrix
+                        # We recover it by taking the norm across the input dimension
+                        checkpoint_mag = torch.linalg.norm(checkpoint_mag.view(module.out_dim, -1), dim=1).unsqueeze(1)
+                    else:
+                        # Truly incompatible
+                        print(f"Warning: Checkpoint DoRA magnitude for {lora_name} has incompatible size {checkpoint_mag.numel()}. Expected {module.out_dim}. Skipping.")
+                        checkpoint_mag = orig_mag
+                else:
+                    checkpoint_mag = checkpoint_mag.view(module.out_dim, 1)
+
+                module.dora_mag.weight.data = (orig_mag + (checkpoint_mag - orig_mag) * multiplier).to(module.dora_mag.weight.dtype).detach()
             else:
                 module.dora_mag = None
 
@@ -301,7 +325,7 @@ class LoRAMerger(LoRAWrapper):
 
         for lora_name, mul in lora_multipliers.items():
             if mul > 0:
-                self.load_weights(torch.load(self.lora_paths[lora_name]), multiplier=mul)
+                self.load_weights(torch.load(self.lora_paths[lora_name], map_location='cpu'), multiplier=mul)
                 self.net.update_base()
                 print(f'{lora_name} merged with strength {mul}')
 

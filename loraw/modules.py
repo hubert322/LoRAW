@@ -40,7 +40,14 @@ class LoRAModule(nn.Module):
 
         # Set dora magnitude to that of the original module weight
         if self.dora_mag is not None:
-            self.dora_mag.weight.data = (torch.linalg.norm(self.original_module.weight.detach(), dim=1)).unsqueeze(1).detach()
+            weight = self.original_module.weight.detach()
+            if weight.ndim == 1 and hasattr(self, 'out_dim') and weight.numel() % self.out_dim == 0:
+                weight = weight.view(self.out_dim, -1)
+            
+            if weight.ndim > 1:
+                self.dora_mag.weight.data = (torch.linalg.norm(weight.view(self.out_dim, -1), dim=1)).unsqueeze(1).detach()
+            else:
+                self.dora_mag.weight.data = weight.view(-1, 1).detach()
 
     def forward(self, x):
         # Module dropout (skip lora module)
@@ -66,14 +73,29 @@ class LoRAModule(nn.Module):
             return lx
         
         # Calculate V + dV for dora scaling in f32 to prevent overflow
-        v_plus_dv = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        if self.original_module.weight.ndim == 2:
+            dW = (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        else:
+            dW = (self.lora_up.weight.squeeze(-1) @ self.lora_down.weight.flatten(1)).view_as(self.original_module.weight) * self.scale
+        v_plus_dv = self.original_module.weight.view_as(dW) + dW
         v_plus_dv_f32 = v_plus_dv.float()
-        norm = torch.linalg.norm(v_plus_dv_f32, dim=1).detach()
+        
+        # Defensive reshape for norm calculation: (out_dim, -1)
+        # We use view(self.out_dim, -1) to ensure we handle both 1D (quantized) and multi-dim weights
+        v_plus_dv_flat = v_plus_dv_f32.view(self.out_dim, -1)
+        norm = torch.linalg.norm(v_plus_dv_flat, dim=1).detach()
         mag = self.dora_mag.weight.view(-1)
         norm_scale = (mag / (norm + 1e-6)).to(x.dtype)
         
         # Apply scaling to the already computed lx = x(V + dV)
-        return norm_scale * lx
+        # norm_scale has shape (out_dim,), lx has shape (batch, seq, out_dim) or (batch, out_dim, ...)
+        # We need to ensure it broadcasts correctly
+        if lx.ndim == 3:
+            return norm_scale.view(1, 1, -1) * lx
+        elif lx.ndim == 4:
+            return norm_scale.view(1, -1, 1, 1) * lx
+        else:
+            return norm_scale * lx
 
     def inject(self, parent_module):
         # Replace original module with lora module
@@ -88,16 +110,31 @@ class LoRAModule(nn.Module):
         # Update original module weights
         dtype = self.original_module.weight.dtype
         
+        if self.original_module.weight.ndim == 2:
+            dW = (self.lora_up.weight @ self.lora_down.weight) * self.scale
+        else:
+            # Handle Conv1d or other multi-dim weights
+            # Assuming lora_up is (out, rank, 1) and lora_down is (rank, in, k)
+            # Or similar packed structures
+            dW = (self.lora_up.weight.squeeze(-1) @ self.lora_down.weight.flatten(1)).view_as(self.original_module.weight) * self.scale
+
         if self.dora_mag is None:
-            updated = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
+            updated = self.original_module.weight.view_as(dW) + dW
         else:
             # Apply DoRA weight update formula: W_new = m * (V + dV) / ||V + dV||
             # We perform the norm in float32 to prevent overflow in FP16
-            v_plus_dv = self.original_module.weight + (self.lora_up.weight @ self.lora_down.weight) * self.scale
-            mag = self.dora_mag.weight.view(-1, 1)
+            v_plus_dv = self.original_module.weight.view_as(dW) + dW
             v_plus_dv_f32 = v_plus_dv.float()
-            norm = torch.linalg.norm(v_plus_dv_f32, dim=1, keepdim=True)
-            updated = mag * (v_plus_dv_f32 / (norm + 1e-6))
+            
+            mag = self.dora_mag.weight.view(-1, 1)
+            # Robust norm: ensure it's at least 2D (out_dim, -1)
+            v_plus_dv_flat = v_plus_dv_f32.view(self.out_dim, -1)
+            norm = torch.linalg.norm(v_plus_dv_flat, dim=1, keepdim=True)
+            
+            # Division and multiplication with broadcasting
+            # We use v_plus_dv_flat for scaling then reshape back
+            updated_flat = mag * (v_plus_dv_flat / (norm + 1e-6))
+            updated = updated_flat.view_as(v_plus_dv_f32)
             updated = updated.to(dtype)
 
         self.original_module.weight.data = updated.to(dtype).clone().detach()
@@ -125,7 +162,7 @@ class LoRALinear(LoRAModule):
         self.lora_down = torch.nn.Linear(self.in_dim, self.lora_dim, bias=False)
         self.lora_up = torch.nn.Linear(self.lora_dim, self.out_dim, bias=False)
         if decompose:
-            self.dora_mag = torch.nn.Linear(1, self.out_dim)
+            self.dora_mag = torch.nn.Linear(1, self.out_dim, bias=False)
     
         self.init_weights()
 
@@ -156,13 +193,15 @@ class LoRAConv1d(LoRAModule):
         )
         in_dim = original_module.in_channels
         out_dim = original_module.out_channels
-        kernel_size = original_module.kernel_size
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.kernel_size = original_module.kernel_size
         stride = original_module.stride
         padding = original_module.padding
-        self.lora_down = torch.nn.Conv1d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
+        self.lora_down = torch.nn.Conv1d(in_dim, self.lora_dim, self.kernel_size, stride, padding, bias=False)
         self.lora_up = torch.nn.Conv1d(self.lora_dim, out_dim, 1, 1, bias=False)
         if decompose:
-            self.dora_mag = torch.nn.Linear(1, self.out_dim)
+            self.dora_mag = torch.nn.Linear(1, self.out_dim, bias=False)
     
         self.init_weights()
 

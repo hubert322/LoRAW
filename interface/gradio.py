@@ -22,11 +22,12 @@ from loraw.network import LoRAMerger
 
 # Patch TransformerBlock to ignore mask_args if it's not accepted
 from stable_audio_tools.models import transformer
-old_transformer_block_forward = transformer.TransformerBlock.forward
-def new_transformer_block_forward(self, *args, **kwargs):
-    kwargs.pop("mask_args", None)
-    return old_transformer_block_forward(self, *args, **kwargs)
-transformer.TransformerBlock.forward = new_transformer_block_forward
+if not hasattr(transformer.TransformerBlock, "_original_forward"):
+    transformer.TransformerBlock._original_forward = transformer.TransformerBlock.forward
+    def new_transformer_block_forward(self, *args, **kwargs):
+        kwargs.pop("mask_args", None)
+        return self._original_forward(*args, **kwargs)
+    transformer.TransformerBlock.forward = new_transformer_block_forward
 
 model = None
 sample_rate = 32000

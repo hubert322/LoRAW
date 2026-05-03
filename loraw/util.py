@@ -22,8 +22,8 @@ def calculate_svds(model_original, model_tuned, lora_names, lora_dim):
             out_dim = map_t[name].out_features
             rank = min(in_dim, out_dim, lora_dim)
 
-            residual = map_t[name].weight.data - map_o[name].weight.data
-            residual.float()
+            residual = map_t[name].weight.data - map_o[name].weight.data.to(map_t[name].weight.device)
+            residual = residual.float()
 
             U, S, Vh = torch.linalg.svd(residual)
 
